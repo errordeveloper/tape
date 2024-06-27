@@ -4,10 +4,11 @@ import (
 	"cmp"
 
 	"github.com/errordeveloper/tape/attest/types"
+	attestTypes "github.com/errordeveloper/tape/attest/types"
 )
 
 const (
-	ManifestDirPredicateType = "docker.com/tape/ManifestDir/v0.1"
+	ManifestDirPredicateType = "docker.com/tape/ManifestDir/v0.2"
 )
 
 var (
@@ -15,7 +16,7 @@ var (
 )
 
 type DirContents struct {
-	types.GenericStatement[SourceDirectory]
+	types.GenericStatement[SourceDirectoryContents]
 }
 
 type SourceDirectory struct {
@@ -24,14 +25,16 @@ type SourceDirectory struct {
 	VCSEntries *types.PathCheckSummaryCollection `json:"vcsEntries"`
 }
 
+type SourceDirectoryContents struct {
+	SourceDirectory `json:"containedInDirectory"`
+}
+
 func MakeDirContentsStatement(dir string, entries *types.PathCheckSummaryCollection) types.Statement {
 	return &DirContents{
-		types.MakeStatement[SourceDirectory](
+		types.MakeStatement[SourceDirectoryContents](
 			ManifestDirPredicateType,
-			struct {
-				SourceDirectory `json:"containedInDirectory"`
-			}{
-				SourceDirectory{
+			SourceDirectoryContents{
+				SourceDirectory: SourceDirectory{
 					Path:       dir,
 					VCSEntries: entries,
 				},
@@ -39,6 +42,14 @@ func MakeDirContentsStatement(dir string, entries *types.PathCheckSummaryCollect
 			entries.Subject()...,
 		),
 	}
+}
+
+func MakeDirContentsStatementFrom(statement types.Statement) DirContents {
+	dirContents := DirContents{
+		GenericStatement: attestTypes.GenericStatement[SourceDirectoryContents]{},
+	}
+	dirContents.ConvertFrom(statement)
+	return dirContents
 }
 
 func (a SourceDirectory) Compare(b SourceDirectory) types.Cmp {
@@ -53,4 +64,8 @@ func (a SourceDirectory) Compare(b SourceDirectory) types.Cmp {
 	}
 	cmp := a.VCSEntries.Compare(*b.VCSEntries)
 	return &cmp
+}
+
+func (a SourceDirectoryContents) Compare(b SourceDirectoryContents) types.Cmp {
+	return a.SourceDirectory.Compare(b.SourceDirectory)
 }

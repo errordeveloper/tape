@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"golang.org/x/mod/semver"
+
 	ociclient "github.com/fluxcd/pkg/oci"
 	"github.com/go-git/go-git/v5/utils/ioutil"
 	"github.com/google/go-containerregistry/pkg/compression"
@@ -23,7 +25,9 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	typesv1 "github.com/google/go-containerregistry/pkg/v1/types"
 
+	"github.com/errordeveloper/tape/attest/manifest"
 	attestTypes "github.com/errordeveloper/tape/attest/types"
+	"github.com/errordeveloper/tape/attest/vcs/git"
 	manifestTypes "github.com/errordeveloper/tape/manifest/types"
 )
 
@@ -51,6 +55,13 @@ type ArtefactInfo struct {
 	MediaType   MediaType
 	Annotations map[string]string
 	Digest      string
+}
+
+type PackageRefs struct {
+	Digest  string
+	Primary string
+	Short   string
+	SemVer  []string
 }
 
 func (c *Client) Fetch(ctx context.Context, ref string, mediaTypes ...MediaType) ([]*ArtefactInfo, error) {
@@ -216,10 +227,10 @@ func (c *Client) getImage(ctx context.Context, imageIndex ImageIndex, digest Has
 }
 
 // based on https://github.com/fluxcd/pkg/blob/2a323d771e17af02dee2ccbbb9b445b78ab048e5/oci/client/push.go
-func (c *Client) PushArtefact(ctx context.Context, destinationRef, sourceDir string, timestamp *time.Time, sourceAttestations ...attestTypes.Statement) (string, error) {
+func (c *Client) PushArtefact(ctx context.Context, destinationRef, sourceDir string, timestamp *time.Time, sourceAttestations ...attestTypes.Statement) (*PackageRefs, error) {
 	tmpDir, err := os.MkdirTemp("", "bpt-oci-artefact-*")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -227,7 +238,7 @@ func (c *Client) PushArtefact(ctx context.Context, destinationRef, sourceDir str
 
 	outputFile, err := os.OpenFile(tmpFile, os.O_RDWR|os.O_CREATE|os.O_EXCL, regularFileMode)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer outputFile.Close()
 
@@ -236,21 +247,22 @@ func (c *Client) PushArtefact(ctx context.Context, destinationRef, sourceDir str
 	output := io.MultiWriter(outputFile, c.hash)
 
 	if err := c.BuildArtefact(tmpFile, sourceDir, output); err != nil {
-		return "", err
+		return nil, err
 	}
 
 	attestLayer, err := c.BuildAttestations(sourceAttestations)
 	if err != nil {
-		return "", fmt.Errorf("failed to serialise attestations: %w", err)
+		return nil, fmt.Errorf("failed to serialise attestations: %w", err)
 	}
 
 	repo, err := name.NewRepository(destinationRef)
 	if err != nil {
-		return "", fmt.Errorf("invalid URL: %w", err)
+		return nil, fmt.Errorf("invalid URL: %w", err)
 	}
 	hash := hex.EncodeToString(c.hash.Sum(nil))
 	tag := repo.Tag(manifestTypes.ConfigImageTagPrefix + hash)
-	tagAlias := tag.Context().Tag(manifestTypes.ConfigImageTagPrefix + hash[:7])
+	shortTag := tag.Context().Tag(manifestTypes.ConfigImageTagPrefix + hash[:7])
+	semVerTags := SemVerTagsFromAttestations(ctx, tag, sourceAttestations...)
 
 	if timestamp == nil {
 		timestamp = new(time.Time)
@@ -287,12 +299,12 @@ func (c *Client) PushArtefact(ctx context.Context, destinationRef, sourceDir str
 		tarball.WithCompressedCaching,
 	)
 	if err != nil {
-		return "", fmt.Errorf("creating artefact content layer failed: %w", err)
+		return nil, fmt.Errorf("creating artefact content layer failed: %w", err)
 	}
 
 	config, err = mutate.Append(config, mutate.Addendum{Layer: configLayer})
 	if err != nil {
-		return "", fmt.Errorf("appeding content to artifact failed: %w", err)
+		return nil, fmt.Errorf("appeding content to artifact failed: %w", err)
 	}
 
 	index = mutate.AppendManifests(index,
@@ -307,7 +319,7 @@ func (c *Client) PushArtefact(ctx context.Context, destinationRef, sourceDir str
 
 		summary, err := (attestTypes.Statements)(sourceAttestations).MarshalSummaryAnnotation()
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		attestAnnotations[AttestationsSummaryAnnotation] = summary
 
@@ -321,7 +333,7 @@ func (c *Client) PushArtefact(ctx context.Context, destinationRef, sourceDir str
 
 		attest, err = mutate.Append(attest, mutate.Addendum{Layer: attestLayer})
 		if err != nil {
-			return "", fmt.Errorf("appeding attestations to artifact failed: %w", err)
+			return nil, fmt.Errorf("appeding attestations to artifact failed: %w", err)
 		}
 
 		index = mutate.AppendManifests(index,
@@ -334,18 +346,69 @@ func (c *Client) PushArtefact(ctx context.Context, destinationRef, sourceDir str
 
 	digest, err := index.Digest()
 	if err != nil {
-		return "", fmt.Errorf("parsing index digest failed: %w", err)
+		return nil, fmt.Errorf("parsing index digest failed: %w", err)
 	}
 
 	if err := remote.WriteIndex(tag, index, c.remoteWithContext(ctx)...); err != nil {
-		return "", fmt.Errorf("pushing index failed: %w", err)
+		return nil, fmt.Errorf("pushing index failed: %w", err)
 	}
 
-	if err := remote.Tag(tagAlias, index, c.remoteWithContext(ctx)...); err != nil {
-		return "", fmt.Errorf("adding alias tagging failed: %w", err)
+	refs := &PackageRefs{
+		Digest:  digest.String(),
+		Primary: tag.String(),
+		Short:   shortTag.String(),
+		SemVer:  make([]string, len(semVerTags)),
 	}
 
-	return tagAlias.String() + "@" + digest.String(), err
+	for i, tagAlias := range append(semVerTags, shortTag) {
+		if err := remote.Tag(tagAlias, index, c.remoteWithContext(ctx)...); err != nil {
+			return nil, fmt.Errorf("adding alias tagging failed: %w", err)
+		}
+		if i < len(semVerTags) {
+			refs.SemVer[i] = tagAlias.String() + "@" + digest.String()
+		}
+	}
+	return refs, nil
+}
+
+func (p *PackageRefs) String() string { return p.Short + "@" + p.Digest }
+
+func SemVerTagsFromAttestations(ctx context.Context, tag name.Tag, sourceAttestations ...attestTypes.Statement) []name.Tag {
+	statements := attestTypes.FilterByPredicateType(manifest.ManifestDirPredicateType, sourceAttestations)
+	if len(statements) != 1 {
+		return []name.Tag{}
+	}
+
+	entries := manifest.MakeDirContentsStatementFrom(statements[0]).GetUnderlyingPredicate().VCSEntries
+	if len(entries.EntryGroups) != 1 && len(entries.Providers) != 1 ||
+		entries.Providers[0] != git.ProviderName {
+		return []name.Tag{}
+	}
+	if len(entries.EntryGroups[0]) == 0 {
+		return []name.Tag{}
+	}
+
+	// TODO: try to use generics for this?
+	groupSummary, ok := entries.EntryGroups[0][0].Full().(*git.Summary)
+	if !ok {
+		return []name.Tag{}
+	}
+	ref := groupSummary.Git.Reference
+	if len(ref.Tags) == 0 {
+		return []name.Tag{}
+	}
+	// TODO: detect tags with groupSummary.Path+"/" as prefix and priorities them
+	tags := make([]name.Tag, 0, len(ref.Tags))
+	for i := range ref.Tags {
+		t := ref.Tags[i].Name
+		if semver.IsValid(t) || semver.IsValid("v"+t) {
+			tags = append(tags, tag.Context().Tag(ref.Tags[i].Name))
+		}
+	}
+	if len(tags) == 0 {
+		return []name.Tag{}
+	}
+	return tags
 }
 
 func makeDescriptorWithPlatform() Descriptor {

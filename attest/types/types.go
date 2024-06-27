@@ -119,6 +119,30 @@ func Export(s ExportableStatement) toto.Statement {
 	}
 }
 
+func FilterByPredicateType(t string, s Statements) Statements {
+	results := Statements{}
+	for i := range s {
+		if s[i].GetType() == t {
+			results = append(results, s[i])
+		}
+	}
+	return results
+}
+
+type StamentConverter[T any] struct {
+	Statement
+}
+
+func (s *GenericStatement[T]) ConvertFrom(statement Statement) error {
+	predicate, ok := statement.GetPredicate().(ComparablePredicate[T])
+	if !ok {
+		return fmt.Errorf("cannot convert statement with predicte of type %T into %T", statement.GetPredicate(), GenericStatement[T]{})
+	}
+
+	*s = MakeStatement[T](statement.GetType(), predicate, statement.GetSubject()...)
+	return nil
+}
+
 func (s Statements) Export() []toto.Statement {
 	statements := make([]toto.Statement, len(s))
 	for i := range s {
@@ -368,8 +392,9 @@ func comparePathCheckSummaries(a, b PathCheckSummary) int {
 	return cmp.Compare(a.Common().Path, b.Common().Path)
 }
 
-func (p Predicate[T]) GetType() string   { return p.Type }
-func (p Predicate[T]) GetPredicate() any { return p.ComparablePredicate }
+func (p Predicate[T]) GetType() string           { return p.Type }
+func (p Predicate[T]) GetPredicate() any         { return p.ComparablePredicate }
+func (p Predicate[T]) GetUnderlyingPredicate() T { return p.ComparablePredicate.(T) }
 
 func (p Predicate[T]) Compare(b any) Cmp {
 	if b, ok := b.(Predicate[T]); ok {

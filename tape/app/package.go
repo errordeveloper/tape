@@ -182,11 +182,16 @@ func (c *TapePackageCommand) Execute(args []string) error {
 	path, sourceEpochTimestamp := loader.MostRecentlyModified()
 	c.tape.log.Debugf("using source epoch timestamp %s from most recently modified manifest file %q", sourceEpochTimestamp, path)
 	packager := packager.NewDefaultPackager(client, c.OutputImage, &sourceEpochTimestamp, attreg.GetStatements()...)
-	packageRef, err := packager.Push(ctx, images.Dir())
+	packageRefs, err := packager.Push(ctx, images.Dir())
 	if err != nil {
 		return fmt.Errorf("failed to create package: %w", err)
 	}
 
-	c.tape.log.Infof("created package %q", packageRef)
+	c.tape.log.Infof("created package %q", packageRefs.String())
+	// c.tape.log.Infof("primary reference %q", packageRefs.Primary)
+
+	if len(packageRefs.SemVer) > 0 {
+		c.tape.log.Infof("additional semver tags from VCS: %s", strings.Join(packageRefs.SemVer, ", "))
+	}
 	return nil
 }

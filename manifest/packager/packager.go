@@ -10,7 +10,7 @@ import (
 
 type Packager interface {
 	//Pull(string) error
-	Push(context.Context, string) (string, error)
+	Push(context.Context, string) (*oci.PackageRefs, error)
 }
 
 type DefaultPackager struct {
@@ -32,7 +32,7 @@ func NewDefaultPackager(client *oci.Client, destinationRef string, sourceEpochTi
 	}
 }
 
-func (r *DefaultPackager) Push(ctx context.Context, dir string) (string, error) {
+func (r *DefaultPackager) Push(ctx context.Context, dir string) (*oci.PackageRefs, error) {
 	return r.Client.PushArtefact(ctx, r.destinationRef, dir,
 		r.sourceEpochTimestamp, r.sourceAttestations...)
 }
