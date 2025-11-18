@@ -94,7 +94,8 @@ func (c *Client) Copy(ctx context.Context, srcRef, dstRef, digest string) error 
 }
 
 func (c *Client) GetIndexOrImage(ctx context.Context, ref string) (v1.ImageIndex, *v1.IndexManifest, v1.Image, error) {
-	parsedRef, err := name.ParseReference(ref)
+	craneOpts := crane.GetOptions(c.GetOptions()...)
+	parsedRef, err := name.ParseReference(ref, craneOpts.Name...)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("invalid URL %q: %w", ref, err)
 	}

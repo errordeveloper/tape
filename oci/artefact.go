@@ -19,6 +19,7 @@ import (
 	ociclient "github.com/fluxcd/pkg/oci"
 	"github.com/go-git/go-git/v5/utils/ioutil"
 	"github.com/google/go-containerregistry/pkg/compression"
+	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
@@ -256,7 +257,8 @@ func (c *Client) PushArtefact(ctx context.Context, destinationRef, sourceDir str
 		return nil, fmt.Errorf("failed to serialise attestations: %w", err)
 	}
 
-	repo, err := name.NewRepository(destinationRef)
+	craneOpts := crane.GetOptions(c.GetOptions()...)
+	repo, err := name.NewRepository(destinationRef, craneOpts.Name...)
 	if err != nil {
 		return nil, fmt.Errorf("invalid URL: %w", err)
 	}
